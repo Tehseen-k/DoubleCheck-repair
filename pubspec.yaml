@@ -1,0 +1,43 @@
+name: doublecheck_repairs
+description: DoubleCheck Repairs — full-screen WebView shell for transparent.repairs.com.
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.11.3
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  connectivity_plus: ^6.1.4
+  flutter_inappwebview: ^6.1.5
+  flutter_web_auth_2: ^4.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.3
+  flutter_native_splash: ^2.4.6
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/images/app_icon.png
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: assets/images/app_icon.png
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: assets/images/app_icon.png
+
+flutter_native_splash:
+  color: "#F59E0B"
+  image: assets/images/app_icon.png
+  android_12:
+    color: "#F59E0B"
+    image: assets/images/app_icon.png
