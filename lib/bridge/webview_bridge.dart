@@ -14,7 +14,6 @@ abstract final class WebViewBridge {
       handlerName: interactionHandler,
       callback: (args) => onUserInteraction(),
     );
-
     await injectInteractionScript(controller);
   }
 
@@ -23,8 +22,8 @@ abstract final class WebViewBridge {
   ) async {
     await controller.evaluateJavascript(source: '''
       (function () {
-        if (window.__dcBridgeInstalled) return;
-        window.__dcBridgeInstalled = true;
+        if (window.__dcInteractionHookInstalled) return;
+        window.__dcInteractionHookInstalled = true;
 
         const notify = () => {
           if (window.flutter_inappwebview) {
@@ -34,7 +33,7 @@ abstract final class WebViewBridge {
 
         document.addEventListener('click', (event) => {
           const target = event.target.closest(
-            'a[href], button, [role="button"], input[type="submit"], div[role="button"]'
+            'a[href], button, [role="button"], input[type="submit"]'
           );
           if (target) notify();
         }, true);

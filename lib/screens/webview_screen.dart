@@ -1,10 +1,12 @@
 import 'dart:async';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:doublecheck_repairs/bridge/google_auth_bridge.dart';
 import 'package:doublecheck_repairs/bridge/webview_bridge.dart';
+import 'package:doublecheck_repairs/bridge/webview_session_bridge.dart';
 import 'package:doublecheck_repairs/config/app_config.dart';
+import 'package:doublecheck_repairs/services/google_auth_service.dart';
 import 'package:doublecheck_repairs/widgets/error_state_view.dart';
+import 'package:doublecheck_repairs/widgets/otp_registration_sheet.dart';
 import 'package:doublecheck_repairs/widgets/navigation_progress_bar.dart';
 import 'package:doublecheck_repairs/widgets/splash_overlay.dart';
 import 'package:flutter/material.dart';
@@ -18,7 +20,11 @@ class WebViewScreen extends StatefulWidget {
   State<WebViewScreen> createState() => _WebViewScreenState();
 }
 
-class _WebViewScreenState extends State<WebViewScreen> {
+class _WebViewScreenState extends State<WebViewScreen>
+    with WidgetsBindingObserver {
+  final _scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
+  late final GoogleAuthService _authService;
+
   InAppWebViewController? _webViewController;
   PullToRefreshController? _pullToRefreshController;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
@@ -33,11 +39,19 @@ class _WebViewScreenState extends State<WebViewScreen> {
   bool _isNavigating = false;
   bool _navigationIndeterminate = false;
   double _loadProgress = 0;
-  bool _isGoogleAuthInProgress = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _authService = GoogleAuthService(
+      onSnackbar: (message) {
+        _scaffoldMessengerKey.currentState?.showSnackBar(
+          SnackBar(content: Text(message)),
+        );
+      },
+      onShowOtpSheet: _showOtpRegistrationSheet,
+    );
     _pullToRefreshController = PullToRefreshController(
       settings: PullToRefreshSettings(color: AppConfig.brandColor),
       onRefresh: _handleRefresh,
@@ -46,13 +60,25 @@ class _WebViewScreenState extends State<WebViewScreen> {
     _connectivitySubscription =
         Connectivity().onConnectivityChanged.listen(_onConnectivityChanged);
     unawaited(_checkConnectivity());
+    debugPrint('APP START: loading URL: ${AppConfig.webUrl}');
+    debugPrint('APP START: calling signInSilently() in background');
+    unawaited(_authService.initialize());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_authService.onAppResumed());
+    }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _splashTimeout?.cancel();
     _navigationTimeout?.cancel();
     _connectivitySubscription?.cancel();
+    WebViewSessionBridge.detach();
     super.dispose();
   }
 
@@ -189,13 +215,11 @@ class _WebViewScreenState extends State<WebViewScreen> {
   bool get _showLoadErrorOverlay => _hasLoadError && _hasLoadedOnce;
 
   bool get _showNavigationBar =>
-      !_showSplash &&
-      !_showBlockingError &&
-      (_isNavigating || _isGoogleAuthInProgress) &&
-      _hasLoadedOnce;
+      !_showSplash && !_showBlockingError && _isNavigating && _hasLoadedOnce;
 
   Future<void> _onWebViewCreated(InAppWebViewController controller) async {
     _webViewController = controller;
+    WebViewSessionBridge.attach(controller);
     await WebViewBridge.registerHandlers(
       controller,
       onUserInteraction: _onUserInteraction,
@@ -211,6 +235,7 @@ class _WebViewScreenState extends State<WebViewScreen> {
   }
 
   void _onLoadStart(InAppWebViewController controller, WebUri? url) {
+    debugPrint('WEBVIEW LOAD START: url=$url');
     if (!mounted) return;
     setState(() {
       _hasLoadError = false;
@@ -307,33 +332,49 @@ class _WebViewScreenState extends State<WebViewScreen> {
     await SystemNavigator.pop();
   }
 
+  void _showOtpRegistrationSheet(OtpSheetRequest request) {
+    if (!mounted) return;
+
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      isDismissible: false,
+      enableDrag: false,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (context) => OtpRegistrationSheet(
+        email: request.email,
+        onVerify: request.onVerify,
+        onResend: request.onResend,
+        onDismiss: request.onDismiss,
+      ),
+    );
+  }
+
   Future<NavigationActionPolicy> _shouldOverrideUrlLoading(
     InAppWebViewController controller,
     NavigationAction navigationAction,
   ) async {
-    if (!navigationAction.isForMainFrame) {
-      return NavigationActionPolicy.ALLOW;
-    }
-
     final url = navigationAction.request.url;
-    if (url == null) return NavigationActionPolicy.ALLOW;
+    final urlString = url?.toString() ?? '';
+    final isGoogleOAuth = GoogleAuthService.isGoogleOAuthUrl(url);
+    final intercepted = isGoogleOAuth;
 
-    final policy = await GoogleAuthBridge.interceptNavigation(
-      url: url,
-      webViewController: controller,
-      onAuthStarted: () {
-        if (!mounted) return;
-        setState(() => _isGoogleAuthInProgress = true);
-        _beginNavigation(indeterminate: true);
-      },
-      onAuthFinished: () {
-        if (!mounted) return;
-        setState(() => _isGoogleAuthInProgress = false);
-        _endNavigation();
-      },
+    debugPrint(
+      'NAVIGATION: url=$urlString intercepted=$intercepted',
+    );
+    debugPrint(
+      'GOOGLE INTERCEPT: detected=$isGoogleOAuth url=$urlString',
     );
 
-    return policy ?? NavigationActionPolicy.ALLOW;
+    if (isGoogleOAuth) {
+      debugPrint('NATIVE GOOGLE SIGNIN: triggered');
+      unawaited(_authService.handleWebGoogleOAuthIntercept());
+      return NavigationActionPolicy.CANCEL;
+    }
+    return NavigationActionPolicy.ALLOW;
   }
 
   static final _webViewSettings = InAppWebViewSettings(
@@ -374,10 +415,13 @@ class _WebViewScreenState extends State<WebViewScreen> {
           if (didPop) return;
           await _handleBackNavigation();
         },
-        child: Scaffold(
-          backgroundColor: Colors.white,
-          body: SafeArea(
-            child: _buildBody(),
+        child: ScaffoldMessenger(
+          key: _scaffoldMessengerKey,
+          child: Scaffold(
+            backgroundColor: Colors.white,
+            body: SafeArea(
+              child: _buildBody(),
+            ),
           ),
         ),
       ),
@@ -398,9 +442,9 @@ class _WebViewScreenState extends State<WebViewScreen> {
             onProgressChanged: _onProgressChanged,
             onUpdateVisitedHistory: _onUpdateVisitedHistory,
             onPageCommitVisible: _onPageCommitVisible,
-            shouldOverrideUrlLoading: _shouldOverrideUrlLoading,
             onReceivedError: _onReceivedError,
             onReceivedHttpError: _onReceivedHttpError,
+            shouldOverrideUrlLoading: _shouldOverrideUrlLoading,
           ),
         ),
         if (_showSplash && !_showBlockingError)

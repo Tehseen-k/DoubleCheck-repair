@@ -81,16 +81,18 @@
 		</dict>
 		<key>io.flutter.embedded_views_preview</key>
 		<true/>
+		<key>GIDClientID</key>
+		<string>437384066136-5c7u708m1oc4uejc51qg94ngkutll42r.apps.googleusercontent.com</string>
 		<key>CFBundleURLTypes</key>
 		<array>
 			<dict>
 				<key>CFBundleTypeRole</key>
 				<string>Editor</string>
 				<key>CFBundleURLName</key>
-				<string>com.transparentrepairs.app</string>
+				<string>com.transparentrepairs.app.google</string>
 				<key>CFBundleURLSchemes</key>
 				<array>
-					<string>doublecheckrepairs</string>
+					<string>com.googleusercontent.apps.437384066136-5c7u708m1oc4uejc51qg94ngkutll42r</string>
 				</array>
 			</dict>
 		</array>
