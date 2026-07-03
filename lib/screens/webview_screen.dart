@@ -8,6 +8,7 @@ import 'package:doublecheck_repairs/services/google_auth_service.dart';
 import 'package:doublecheck_repairs/services/iap_service.dart';
 import 'package:doublecheck_repairs/widgets/error_state_view.dart';
 import 'package:doublecheck_repairs/widgets/otp_registration_sheet.dart';
+import 'package:doublecheck_repairs/widgets/plan_selection_sheet.dart';
 import 'package:doublecheck_repairs/widgets/navigation_progress_bar.dart';
 import 'package:doublecheck_repairs/widgets/splash_overlay.dart';
 import 'package:flutter/material.dart';
@@ -92,18 +93,58 @@ class _WebViewScreenState extends State<WebViewScreen>
     switch (type) {
       case 'purchase':
         final productId = message['productId']?.toString();
-        if (productId == null || productId.isEmpty) {
-          debugPrint('BRIDGE: purchase request missing productId');
-          return;
-        }
-        debugPrint('BRIDGE: purchase request received for $productId');
-        unawaited(_iapService.purchaseSubscription(productId));
+        _handleSubscriptionIntercept(productId);
+      case 'select_plan':
+        _showPlanSelectionSheet();
       case 'restore_purchases':
         debugPrint('BRIDGE: restore purchases requested');
         unawaited(_iapService.restorePurchases());
       default:
         debugPrint('BRIDGE: unknown message type: $type');
     }
+  }
+
+  void _handleSubscriptionIntercept(String? productId) {
+    if (productId != null &&
+        productId.isNotEmpty &&
+        AppConfig.subscriptionProductIds.contains(productId)) {
+      debugPrint('BRIDGE: intercepted Subscription POST — redirecting to IAP');
+      debugPrint('BRIDGE: purchase request received for $productId');
+      unawaited(_iapService.purchaseSubscription(productId));
+      return;
+    }
+
+    debugPrint(
+      'BRIDGE: intercepted Subscription POST — redirecting to IAP '
+      '(plan selection required)',
+    );
+    _showPlanSelectionSheet();
+  }
+
+  String? _productIdFromSubscriptionUrl(String url) {
+    final lower = url.toLowerCase();
+    if (lower.contains('year')) return 'yearly_99';
+    if (lower.contains('month')) return 'monthly_10';
+    return null;
+  }
+
+  void _showPlanSelectionSheet() {
+    if (!mounted) return;
+
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (context) => PlanSelectionSheet(
+        onSelect: (productId) {
+          Navigator.of(context).pop();
+          debugPrint('BRIDGE: purchase request received for $productId');
+          unawaited(_iapService.purchaseSubscription(productId));
+        },
+      ),
+    );
   }
 
   @override
@@ -281,7 +322,7 @@ class _WebViewScreenState extends State<WebViewScreen>
 
   void _onLoadStart(InAppWebViewController controller, WebUri? url) {
     debugPrint('WEBVIEW LOAD START: url=$url');
-    unawaited(WebViewBridge.injectFlutterAppFlag(controller));
+    unawaited(WebViewBridge.injectPageLoadBridgeScripts(controller));
     if (!mounted) return;
     setState(() {
       _hasLoadError = false;
@@ -305,6 +346,7 @@ class _WebViewScreenState extends State<WebViewScreen>
   Future<void> _reinjectInteractionScript(
     InAppWebViewController controller,
   ) async {
+    await WebViewBridge.injectPageLoadBridgeScripts(controller);
     await WebViewBridge.injectInteractionScript(controller);
     await WebViewBridge.logBridgeAvailability(controller);
   }
@@ -406,6 +448,15 @@ class _WebViewScreenState extends State<WebViewScreen>
   ) async {
     final url = navigationAction.request.url;
     final urlString = url?.toString() ?? '';
+    final method =
+        navigationAction.request.method?.toUpperCase() ?? 'GET';
+
+    if (urlString.contains('entities/Subscription') && method == 'POST') {
+      debugPrint('BRIDGE: intercepted Subscription POST — redirecting to IAP');
+      _handleSubscriptionIntercept(_productIdFromSubscriptionUrl(urlString));
+      return NavigationActionPolicy.CANCEL;
+    }
+
     final isGoogleOAuth = GoogleAuthService.isGoogleOAuthUrl(url);
     final intercepted = isGoogleOAuth;
 
