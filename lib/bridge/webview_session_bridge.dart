@@ -65,6 +65,16 @@ abstract final class WebViewSessionBridge {
     );
   }
 
+  static Future<void> notifySubscriptionUpdated() async {
+    final controller = _controller;
+    if (controller == null) return;
+
+    await controller.evaluateJavascript(
+      source: "window.dispatchEvent(new Event('subscriptionUpdated'));",
+    );
+    await navigateTo(AppConfig.dashboardUrl);
+  }
+
   static Future<void> clearSession() async {
     await _controller?.evaluateJavascript(source: 'localStorage.clear();');
   }

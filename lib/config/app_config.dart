@@ -13,6 +13,14 @@ abstract final class AppConfig {
       'https://mechanic-ai-2b194910.base44.app/api/functions/mobileGoogleLogin';
   static const String mobileRegisterUrl =
       'https://mechanic-ai-2b194910.base44.app/api/functions/mobileRegister';
+  static const String verifyPurchaseUrl =
+      'https://mechanic-ai-2b194910.base44.app/api/functions/verifyPurchase';
+
+  static const String androidPackageName = 'com.transparentrepairs.app';
+  static const List<String> subscriptionProductIds = [
+    'monthly_10',
+    'yearly_99',
+  ];
 
   static const String sessionStorageKey = 'base44_access_token';
   static const String legacyTokenStorageKey = 'token';

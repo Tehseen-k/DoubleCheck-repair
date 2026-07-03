@@ -5,6 +5,7 @@ import 'package:doublecheck_repairs/bridge/webview_bridge.dart';
 import 'package:doublecheck_repairs/bridge/webview_session_bridge.dart';
 import 'package:doublecheck_repairs/config/app_config.dart';
 import 'package:doublecheck_repairs/services/google_auth_service.dart';
+import 'package:doublecheck_repairs/services/iap_service.dart';
 import 'package:doublecheck_repairs/widgets/error_state_view.dart';
 import 'package:doublecheck_repairs/widgets/otp_registration_sheet.dart';
 import 'package:doublecheck_repairs/widgets/navigation_progress_bar.dart';
@@ -24,6 +25,7 @@ class _WebViewScreenState extends State<WebViewScreen>
     with WidgetsBindingObserver {
   final _scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
   late final GoogleAuthService _authService;
+  late final IapService _iapService;
 
   InAppWebViewController? _webViewController;
   PullToRefreshController? _pullToRefreshController;
@@ -52,6 +54,21 @@ class _WebViewScreenState extends State<WebViewScreen>
       },
       onShowOtpSheet: _showOtpRegistrationSheet,
     );
+    _iapService = IapService(
+      onSnackbar: (message) {
+        _scaffoldMessengerKey.currentState?.showSnackBar(
+          SnackBar(content: Text(message)),
+        );
+      },
+      onPurchaseSuccess: () {
+        _scaffoldMessengerKey.currentState?.showSnackBar(
+          const SnackBar(
+            content: Text('Subscription activated successfully!'),
+          ),
+        );
+      },
+    );
+    _iapService.addListener(_onIapStateChanged);
     _pullToRefreshController = PullToRefreshController(
       settings: PullToRefreshSettings(color: AppConfig.brandColor),
       onRefresh: _handleRefresh,
@@ -63,6 +80,30 @@ class _WebViewScreenState extends State<WebViewScreen>
     debugPrint('APP START: loading URL: ${AppConfig.webUrl}');
     debugPrint('APP START: calling signInSilently() in background');
     unawaited(_authService.initialize());
+    unawaited(_iapService.initialize());
+  }
+
+  void _onIapStateChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onFlutterBridge(Map<String, dynamic> message) {
+    final type = message['type']?.toString();
+    switch (type) {
+      case 'purchase':
+        final productId = message['productId']?.toString();
+        if (productId == null || productId.isEmpty) {
+          debugPrint('BRIDGE: purchase request missing productId');
+          return;
+        }
+        debugPrint('BRIDGE: purchase request received for $productId');
+        unawaited(_iapService.purchaseSubscription(productId));
+      case 'restore_purchases':
+        debugPrint('BRIDGE: restore purchases requested');
+        unawaited(_iapService.restorePurchases());
+      default:
+        debugPrint('BRIDGE: unknown message type: $type');
+    }
   }
 
   @override
@@ -78,6 +119,8 @@ class _WebViewScreenState extends State<WebViewScreen>
     _splashTimeout?.cancel();
     _navigationTimeout?.cancel();
     _connectivitySubscription?.cancel();
+    _iapService.removeListener(_onIapStateChanged);
+    _iapService.dispose();
     WebViewSessionBridge.detach();
     super.dispose();
   }
@@ -220,9 +263,11 @@ class _WebViewScreenState extends State<WebViewScreen>
   Future<void> _onWebViewCreated(InAppWebViewController controller) async {
     _webViewController = controller;
     WebViewSessionBridge.attach(controller);
+    await WebViewBridge.injectFlutterAppFlag(controller);
     await WebViewBridge.registerHandlers(
       controller,
       onUserInteraction: _onUserInteraction,
+      onFlutterBridge: _onFlutterBridge,
     );
   }
 
@@ -236,6 +281,7 @@ class _WebViewScreenState extends State<WebViewScreen>
 
   void _onLoadStart(InAppWebViewController controller, WebUri? url) {
     debugPrint('WEBVIEW LOAD START: url=$url');
+    unawaited(WebViewBridge.injectFlutterAppFlag(controller));
     if (!mounted) return;
     setState(() {
       _hasLoadError = false;
@@ -260,6 +306,7 @@ class _WebViewScreenState extends State<WebViewScreen>
     InAppWebViewController controller,
   ) async {
     await WebViewBridge.injectInteractionScript(controller);
+    await WebViewBridge.logBridgeAvailability(controller);
   }
 
   void _onProgressChanged(InAppWebViewController controller, int progress) {
@@ -422,6 +469,27 @@ class _WebViewScreenState extends State<WebViewScreen>
             body: SafeArea(
               child: _buildBody(),
             ),
+            appBar: AppBar(
+              backgroundColor: Colors.transparent,
+              elevation: 0,
+              scrolledUnderElevation: 0,
+              actions: [
+                PopupMenuButton<String>(
+                  icon: const Icon(Icons.more_vert, color: Colors.black54),
+                  onSelected: (value) {
+                    if (value == 'restore') {
+                      unawaited(_iapService.restorePurchases());
+                    }
+                  },
+                  itemBuilder: (context) => const [
+                    PopupMenuItem<String>(
+                      value: 'restore',
+                      child: Text('Restore Purchases'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -482,6 +550,17 @@ class _WebViewScreenState extends State<WebViewScreen>
               type: ErrorStateType.loadFailed,
               message: _errorMessage,
               onRetry: _retry,
+            ),
+          ),
+        if (_iapService.purchasePending)
+          Positioned.fill(
+            child: ColoredBox(
+              color: Colors.black.withValues(alpha: 0.25),
+              child: const Center(
+                child: CircularProgressIndicator(
+                  color: AppConfig.brandColor,
+                ),
+              ),
             ),
           ),
       ],
