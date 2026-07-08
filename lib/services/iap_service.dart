@@ -9,8 +9,16 @@ import 'package:http/http.dart' as http;
 import 'package:in_app_purchase/in_app_purchase.dart';
 import 'package:in_app_purchase_android/in_app_purchase_android.dart';
 
-typedef IapSnackbarCallback = void Function(String message);
-typedef IapSuccessCallback = void Function();
+typedef IapSnackbarCallback = void Function(String message, {bool isError});
+typedef IapSuccessCallback = void Function({required bool wasRestore});
+
+enum IapUiState {
+  idle,
+  initiatingPurchase,
+  awaitingStore,
+  verifying,
+  restoring,
+}
 
 /// Google Play subscription purchases and Base44 backend verification.
 class IapService extends ChangeNotifier {
@@ -28,10 +36,13 @@ class IapService extends ChangeNotifier {
   final Map<String, ProductDetails> _products = {};
   final Set<String> _processingPurchaseIds = {};
 
-  bool _purchasePending = false;
+  IapUiState _uiState = IapUiState.idle;
   bool _initialized = false;
+  bool _isRestoreInProgress = false;
+  Timer? _restoreTimeout;
 
-  bool get purchasePending => _purchasePending;
+  bool get purchasePending => _uiState != IapUiState.idle;
+  IapUiState get uiState => _uiState;
   bool get isInitialized => _initialized;
 
   Future<void> initialize() async {
@@ -47,6 +58,11 @@ class IapService extends ChangeNotifier {
       _onPurchaseUpdate,
       onError: (Object error) {
         debugPrint('IAP: purchase stream error — $error');
+        _setUiState(IapUiState.idle);
+        _showSnackbar(
+          'Billing service error. Please try again later.',
+          isError: true,
+        );
       },
     );
 
@@ -86,23 +102,94 @@ class IapService extends ChangeNotifier {
   }
 
   Future<void> purchaseSubscription(String productId) async {
-    if (!Platform.isAndroid) return;
+    if (!Platform.isAndroid) {
+      _showSnackbar('Purchases are only available on Android.', isError: true);
+      return;
+    }
+
+    if (!_initialized) {
+      _showSnackbar(
+        'Billing is still loading. Please wait a moment and try again.',
+        isError: true,
+      );
+      return;
+    }
 
     final product = _products[productId];
     if (product == null) {
-      _showSnackbar('Product not available. Please try again later.');
+      _showSnackbar(
+        'This plan is not available right now. Please try again later.',
+        isError: true,
+      );
       return;
     }
 
     debugPrint('IAP: initiating purchase for $productId');
-    final purchaseParam = GooglePlayPurchaseParam(productDetails: product);
-    await _iap.buyNonConsumable(purchaseParam: purchaseParam);
+    _setUiState(IapUiState.initiatingPurchase);
+
+    try {
+      final purchaseParam = GooglePlayPurchaseParam(productDetails: product);
+      final started = await _iap.buyNonConsumable(purchaseParam: purchaseParam);
+      if (!started) {
+        _setUiState(IapUiState.idle);
+        _showSnackbar(
+          'Could not start the purchase. Please try again.',
+          isError: true,
+        );
+      } else {
+        _setUiState(IapUiState.awaitingStore);
+      }
+    } on Exception catch (error) {
+      debugPrint('IAP: buyNonConsumable error — $error');
+      _setUiState(IapUiState.idle);
+      _showSnackbar(
+        'Could not connect to Google Play. Please try again.',
+        isError: true,
+      );
+    }
   }
 
   Future<void> restorePurchases() async {
-    if (!Platform.isAndroid) return;
+    if (!Platform.isAndroid) {
+      _showSnackbar('Restore is only available on Android.', isError: true);
+      return;
+    }
+
+    if (!_initialized) {
+      _showSnackbar(
+        'Billing is still loading. Please wait a moment and try again.',
+        isError: true,
+      );
+      return;
+    }
+
     debugPrint('IAP: restoring purchases');
-    await _iap.restorePurchases();
+    _isRestoreInProgress = true;
+    _setUiState(IapUiState.restoring);
+
+    _restoreTimeout?.cancel();
+    _restoreTimeout = Timer(const Duration(seconds: 12), () {
+      if (!_isRestoreInProgress) return;
+      _isRestoreInProgress = false;
+      _setUiState(IapUiState.idle);
+      _showSnackbar(
+        'No previous subscriptions were found on this Google account.',
+        isError: false,
+      );
+    });
+
+    try {
+      await _iap.restorePurchases();
+    } on Exception catch (error) {
+      debugPrint('IAP: restorePurchases error — $error');
+      _restoreTimeout?.cancel();
+      _isRestoreInProgress = false;
+      _setUiState(IapUiState.idle);
+      _showSnackbar(
+        'Could not restore purchases. Please try again.',
+        isError: true,
+      );
+    }
   }
 
   void _onPurchaseUpdate(List<PurchaseDetails> purchases) {
@@ -110,10 +197,12 @@ class IapService extends ChangeNotifier {
       switch (purchase.status) {
         case PurchaseStatus.pending:
           debugPrint('IAP: purchase pending ${purchase.productID}');
-          _setPurchasePending(true);
+          _setUiState(IapUiState.awaitingStore);
 
         case PurchaseStatus.purchased:
         case PurchaseStatus.restored:
+          _restoreTimeout?.cancel();
+          _isRestoreInProgress = false;
           unawaited(_handleSuccessfulPurchase(purchase));
 
         case PurchaseStatus.error:
@@ -122,14 +211,38 @@ class IapService extends ChangeNotifier {
             '${purchase.error?.message}',
           );
           unawaited(_completePurchaseIfNeeded(purchase));
-          _setPurchasePending(false);
-          _showSnackbar('Purchase failed. Please try again.');
+          _restoreTimeout?.cancel();
+          _isRestoreInProgress = false;
+          _setUiState(IapUiState.idle);
+          _showSnackbar(
+            _friendlyPurchaseError(purchase.error),
+            isError: true,
+          );
 
         case PurchaseStatus.canceled:
           debugPrint('IAP: purchase canceled');
-          _setPurchasePending(false);
+          _restoreTimeout?.cancel();
+          _isRestoreInProgress = false;
+          _setUiState(IapUiState.idle);
+          _showSnackbar('Purchase cancelled.', isError: false);
       }
     }
+  }
+
+  String _friendlyPurchaseError(IAPError? error) {
+    final code = error?.code ?? '';
+    final message = error?.message ?? '';
+    return switch (code) {
+      'purchase_error' => 'Purchase failed. Please try again.',
+      'store_unavailable' =>
+        'Google Play is unavailable. Check your connection and try again.',
+      'item_unavailable' =>
+        'This subscription is not available in your region or account.',
+      'user_canceled' => 'Purchase cancelled.',
+      _ => message.isNotEmpty
+          ? message
+          : 'Purchase failed. Please try again.',
+    };
   }
 
   Future<void> _handleSuccessfulPurchase(PurchaseDetails purchase) async {
@@ -137,6 +250,7 @@ class IapService extends ChangeNotifier {
     if (_processingPurchaseIds.contains(purchaseKey)) return;
     _processingPurchaseIds.add(purchaseKey);
 
+    final wasRestore = purchase.status == PurchaseStatus.restored;
     final token = purchase.verificationData.serverVerificationData;
     final tokenPreview =
         token.length > 20 ? token.substring(0, 20) : token;
@@ -144,14 +258,16 @@ class IapService extends ChangeNotifier {
       'IAP: purchase successful ${purchase.productID} token=$tokenPreview',
     );
 
+    _setUiState(IapUiState.verifying);
+
     try {
       final verified = await verifyAndActivate(purchase);
       if (verified) {
-        _onPurchaseSuccess?.call();
+        _onPurchaseSuccess?.call(wasRestore: wasRestore);
       }
     } finally {
       _processingPurchaseIds.remove(purchaseKey);
-      _setPurchasePending(false);
+      _setUiState(IapUiState.idle);
     }
   }
 
@@ -186,18 +302,16 @@ class IapService extends ChangeNotifier {
         'IAP: backend verification failed — not completing purchase',
       );
       _showSnackbar(
-        'Purchase recorded, please restart the app to '
-        'activate your subscription',
+        'Your purchase was received but activation failed. '
+        'Please restart the app or contact support if the issue persists.',
+        isError: true,
       );
       return false;
     } on Exception catch (error) {
       debugPrint('IAP: backend verification error — $error');
-      debugPrint(
-        'IAP: backend verification failed — not completing purchase',
-      );
       _showSnackbar(
-        'Purchase recorded, please restart the app to '
-        'activate your subscription',
+        'Could not verify your purchase. Check your connection and try again.',
+        isError: true,
       );
       return false;
     }
@@ -209,18 +323,19 @@ class IapService extends ChangeNotifier {
     }
   }
 
-  void _setPurchasePending(bool pending) {
-    if (_purchasePending == pending) return;
-    _purchasePending = pending;
+  void _setUiState(IapUiState state) {
+    if (_uiState == state) return;
+    _uiState = state;
     notifyListeners();
   }
 
-  void _showSnackbar(String message) {
-    _onSnackbar?.call(message);
+  void _showSnackbar(String message, {required bool isError}) {
+    _onSnackbar?.call(message, isError: isError);
   }
 
   @override
   void dispose() {
+    _restoreTimeout?.cancel();
     _purchaseSubscription?.cancel();
     super.dispose();
   }

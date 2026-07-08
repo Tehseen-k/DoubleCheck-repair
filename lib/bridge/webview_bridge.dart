@@ -1,3 +1,5 @@
+import 'dart:collection';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
@@ -8,6 +10,159 @@ typedef FlutterBridgeCallback = void Function(Map<String, dynamic> message);
 abstract final class WebViewBridge {
   static const String interactionHandler = 'interactionLoading';
   static const String flutterBridgeHandler = 'FlutterBridge';
+
+  static const String _flutterAppStylesScript = r'''
+(function () {
+  if (window.__dcFlutterStylesInstalled) return;
+  window.__dcFlutterStylesInstalled = true;
+
+  window.isFlutterApp = true;
+  window.FLUTTER_APP = true;
+  document.documentElement.classList.add('dc-flutter-app');
+
+  const style = document.createElement('style');
+  style.id = 'dc-flutter-app-styles';
+  style.textContent = `
+    html.dc-flutter-app body {
+      padding-top: env(safe-area-inset-top, 0px) !important;
+      padding-bottom: env(safe-area-inset-bottom, 0px) !important;
+    }
+    html.dc-flutter-app header,
+    html.dc-flutter-app nav,
+    html.dc-flutter-app [class*="header"],
+    html.dc-flutter-app [class*="navbar"],
+    html.dc-flutter-app [class*="Navbar"] {
+      padding-top: max(env(safe-area-inset-top, 0px), 8px) !important;
+    }
+    html.dc-flutter-app header .text-white,
+    html.dc-flutter-app nav .text-white,
+    html.dc-flutter-app [class*="header"] .text-white,
+    html.dc-flutter-app [class*="navbar"] .text-white,
+    html.dc-flutter-app header a,
+    html.dc-flutter-app header button,
+    html.dc-flutter-app nav a,
+    html.dc-flutter-app nav button,
+    html.dc-flutter-app [class*="header"] a,
+    html.dc-flutter-app [class*="header"] button,
+    html.dc-flutter-app [class*="navbar"] a,
+    html.dc-flutter-app [class*="navbar"] button {
+      color: #1F2937 !important;
+      -webkit-text-fill-color: #1F2937 !important;
+      opacity: 1 !important;
+      visibility: visible !important;
+    }
+    html.dc-flutter-app a[href*="login"],
+    html.dc-flutter-app a[href*="sign-in"],
+    html.dc-flutter-app a[href*="signin"],
+    html.dc-flutter-app .dc-auth-control {
+      color: #B45309 !important;
+      -webkit-text-fill-color: #B45309 !important;
+      background-color: #FFFFFF !important;
+      border: 1.5px solid #F59E0B !important;
+      border-radius: 8px !important;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1) !important;
+      padding: 8px 16px !important;
+      opacity: 1 !important;
+      visibility: visible !important;
+    }
+  `;
+  (document.head || document.documentElement).appendChild(style);
+
+  const AUTH_TEXT = /sign\s*in|log\s*in|login|signin/i;
+
+  function applyAuthStyles(el) {
+    if (!el || el.dataset.dcAuthFixed === '1') return;
+    el.dataset.dcAuthFixed = '1';
+    el.classList.add('dc-auth-control');
+    el.style.setProperty('color', '#B45309', 'important');
+    el.style.setProperty('-webkit-text-fill-color', '#B45309', 'important');
+    el.style.setProperty('background-color', '#FFFFFF', 'important');
+    el.style.setProperty('border', '1.5px solid #F59E0B', 'important');
+    el.style.setProperty('border-radius', '8px', 'important');
+    el.style.setProperty('box-shadow', '0 1px 4px rgba(0,0,0,0.1)', 'important');
+    el.style.setProperty('padding', '8px 16px', 'important');
+    el.style.setProperty('opacity', '1', 'important');
+    el.style.setProperty('visibility', 'visible', 'important');
+    el.style.setProperty('display', 'inline-flex', 'important');
+    el.style.setProperty('align-items', 'center', 'important');
+    el.style.setProperty('justify-content', 'center', 'important');
+  }
+
+  function applyHeaderStyles(el) {
+    if (!el || el.dataset.dcHeaderFixed === '1') return;
+    el.dataset.dcHeaderFixed = '1';
+    el.style.setProperty('color', '#1F2937', 'important');
+    el.style.setProperty('-webkit-text-fill-color', '#1F2937', 'important');
+    el.style.setProperty('opacity', '1', 'important');
+    el.style.setProperty('visibility', 'visible', 'important');
+  }
+
+  function isAuthElement(el) {
+    const text = (el.textContent || '').trim();
+    const href = (el.getAttribute('href') || '').toLowerCase();
+    const label = (el.getAttribute('aria-label') || '').trim();
+    return AUTH_TEXT.test(text) ||
+      AUTH_TEXT.test(label) ||
+      href.includes('login') ||
+      href.includes('signin') ||
+      href.includes('sign-in');
+  }
+
+  function isHeaderElement(el) {
+    return !!el.closest('header, nav, [class*="header"], [class*="navbar"], [class*="Navbar"]');
+  }
+
+  function scanAuthControls() {
+    document.querySelectorAll('a, button, [role="button"]').forEach((el) => {
+      if (isAuthElement(el)) {
+        applyAuthStyles(el);
+        return;
+      }
+      if (isHeaderElement(el)) {
+        applyHeaderStyles(el);
+      }
+    });
+  }
+
+  scanAuthControls();
+
+  let scans = 0;
+  const interval = setInterval(() => {
+    scanAuthControls();
+    scans += 1;
+    if (scans >= 20) clearInterval(interval);
+  }, 500);
+
+  const observer = new MutationObserver(() => {
+    scanAuthControls();
+  });
+  observer.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['class', 'style', 'href'],
+  });
+
+  window.addEventListener('load', scanAuthControls);
+  window.addEventListener('popstate', scanAuthControls);
+})();
+''';
+
+  static UnmodifiableListView<UserScript> get initialUserScripts =>
+      UnmodifiableListView<UserScript>([
+        UserScript(
+          source: _flutterAppStylesScript,
+          injectionTime: UserScriptInjectionTime.AT_DOCUMENT_END,
+          forMainFrameOnly: true,
+        ),
+      ]);
+
+  static Future<void> injectFlutterAppStyles(
+    InAppWebViewController controller,
+  ) async {
+    await controller.evaluateJavascript(source: _flutterAppStylesScript);
+    debugPrint('BRIDGE: injected Flutter app UI styles');
+  }
 
   /// Registers [FlutterBridge] immediately — must run in [onWebViewCreated]
   /// before the web page can call `flutter_inappwebview.callHandler`.
@@ -259,6 +414,7 @@ abstract final class WebViewBridge {
         }
       })();
     ''');
+    await injectFlutterAppStyles(controller);
     debugPrint('BRIDGE: injected isFlutterApp flag into WebView');
     debugPrint('BRIDGE: injected subscription fetch/XHR intercept');
     debugPrint('BRIDGE: injected pricing page plan click intercept');

@@ -6,9 +6,12 @@ import 'package:doublecheck_repairs/bridge/webview_session_bridge.dart';
 import 'package:doublecheck_repairs/config/app_config.dart';
 import 'package:doublecheck_repairs/services/google_auth_service.dart';
 import 'package:doublecheck_repairs/services/iap_service.dart';
+import 'package:doublecheck_repairs/widgets/app_snackbar.dart';
 import 'package:doublecheck_repairs/widgets/error_state_view.dart';
+import 'package:doublecheck_repairs/widgets/iap_overlay.dart';
 import 'package:doublecheck_repairs/widgets/otp_registration_sheet.dart';
 import 'package:doublecheck_repairs/widgets/plan_selection_sheet.dart';
+import 'package:doublecheck_repairs/widgets/refresh_overlay.dart';
 import 'package:doublecheck_repairs/widgets/navigation_progress_bar.dart';
 import 'package:doublecheck_repairs/widgets/splash_overlay.dart';
 import 'package:flutter/material.dart';
@@ -41,6 +44,8 @@ class _WebViewScreenState extends State<WebViewScreen>
   bool _showSplash = true;
   bool _isNavigating = false;
   bool _navigationIndeterminate = false;
+  bool _isRefreshing = false;
+  bool _showTransitionOverlay = false;
   double _loadProgress = 0;
 
   @override
@@ -49,30 +54,47 @@ class _WebViewScreenState extends State<WebViewScreen>
     WidgetsBinding.instance.addObserver(this);
     _authService = GoogleAuthService(
       onSnackbar: (message) {
-        _scaffoldMessengerKey.currentState?.showSnackBar(
-          SnackBar(content: Text(message)),
-        );
+        final messenger = _scaffoldMessengerKey.currentState;
+        if (messenger != null) {
+          AppSnackbar.showInfo(messenger, message);
+        }
       },
       onShowOtpSheet: _showOtpRegistrationSheet,
     );
     _iapService = IapService(
-      onSnackbar: (message) {
-        _scaffoldMessengerKey.currentState?.showSnackBar(
-          SnackBar(content: Text(message)),
-        );
+      onSnackbar: (message, {isError = false}) {
+        final messenger = _scaffoldMessengerKey.currentState;
+        if (messenger == null) return;
+        if (isError) {
+          AppSnackbar.showError(messenger, message);
+        } else {
+          AppSnackbar.showInfo(messenger, message);
+        }
       },
-      onPurchaseSuccess: () {
-        _scaffoldMessengerKey.currentState?.showSnackBar(
-          const SnackBar(
-            content: Text('Subscription activated successfully!'),
-          ),
+      onPurchaseSuccess: ({required wasRestore}) {
+        final messenger = _scaffoldMessengerKey.currentState;
+        if (messenger == null) return;
+        AppSnackbar.showSuccess(
+          messenger,
+          wasRestore
+              ? 'Your subscription has been restored!'
+              : 'Subscription activated! Welcome aboard.',
         );
       },
     );
     _iapService.addListener(_onIapStateChanged);
     _pullToRefreshController = PullToRefreshController(
-      settings: PullToRefreshSettings(color: AppConfig.brandColor),
-      onRefresh: _handleRefresh,
+      settings: PullToRefreshSettings(
+        color: AppConfig.brandColor,
+        backgroundColor: Colors.white,
+        size: PullToRefreshSize.DEFAULT,
+      ),
+      onRefresh: () async {
+        try {
+          _pullToRefreshController?.endRefreshing();
+        } catch (_) {}
+        await _handleRefresh();
+      },
     );
     _splashTimeout = Timer(const Duration(seconds: 12), _finishInitialLoad);
     _connectivitySubscription =
@@ -134,15 +156,24 @@ class _WebViewScreenState extends State<WebViewScreen>
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.white,
+      isScrollControlled: true,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (context) => PlanSelectionSheet(
-        onSelect: (productId) {
-          Navigator.of(context).pop();
-          debugPrint('BRIDGE: purchase request received for $productId');
-          unawaited(_iapService.purchaseSubscription(productId));
-        },
+      builder: (sheetContext) => ListenableBuilder(
+        listenable: _iapService,
+        builder: (context, _) => PlanSelectionSheet(
+          isRestoring: _iapService.uiState == IapUiState.restoring,
+          onSelect: (productId) {
+            Navigator.of(sheetContext).pop();
+            debugPrint('BRIDGE: purchase request received for $productId');
+            unawaited(_iapService.purchaseSubscription(productId));
+          },
+          onRestore: () {
+            Navigator.of(sheetContext).pop();
+            unawaited(_iapService.restorePurchases());
+          },
+        ),
       ),
     );
   }
@@ -171,6 +202,7 @@ class _WebViewScreenState extends State<WebViewScreen>
       await _checkConnectivity(reloadOnSuccess: true);
       return;
     }
+    setState(() => _isRefreshing = true);
     _beginNavigation(indeterminate: true);
     await _webViewController?.reload();
   }
@@ -239,6 +271,9 @@ class _WebViewScreenState extends State<WebViewScreen>
 
   void _endRefreshingSafely() {
     if (!mounted) return;
+    if (_isRefreshing) {
+      setState(() => _isRefreshing = false);
+    }
     try {
       _pullToRefreshController?.endRefreshing();
     } catch (_) {}
@@ -268,6 +303,16 @@ class _WebViewScreenState extends State<WebViewScreen>
     }
   }
 
+  void _showPageTransitionOverlay() {
+    if (!mounted || _showSplash) return;
+    setState(() => _showTransitionOverlay = true);
+  }
+
+  void _hidePageTransitionOverlay() {
+    if (!mounted || !_showTransitionOverlay) return;
+    setState(() => _showTransitionOverlay = false);
+  }
+
   void _endNavigation() {
     if (!mounted) return;
     setState(() {
@@ -275,12 +320,15 @@ class _WebViewScreenState extends State<WebViewScreen>
       _navigationIndeterminate = false;
       _loadProgress = 0;
     });
+    _hidePageTransitionOverlay();
   }
 
   void _finishInitialLoad() {
     _splashTimeout?.cancel();
     _navigationTimeout?.cancel();
     if (!mounted) return;
+
+    final wasShowingSplash = _showSplash;
     setState(() {
       _showSplash = false;
       _isNavigating = false;
@@ -288,6 +336,9 @@ class _WebViewScreenState extends State<WebViewScreen>
       _loadProgress = 0;
       if (!_hasLoadError) {
         _hasLoadedOnce = true;
+      }
+      if (wasShowingSplash && _hasLoadedOnce && !_hasLoadError) {
+        _showTransitionOverlay = true;
       }
     });
     _endRefreshingSafely();
@@ -299,12 +350,26 @@ class _WebViewScreenState extends State<WebViewScreen>
   bool get _showLoadErrorOverlay => _hasLoadError && _hasLoadedOnce;
 
   bool get _showNavigationBar =>
-      !_showSplash && !_showBlockingError && _isNavigating && _hasLoadedOnce;
+      !_showSplash &&
+      !_showBlockingError &&
+      !_showTransitionOverlay &&
+      !_isRefreshing &&
+      _isNavigating &&
+      _hasLoadedOnce;
+
+  bool get _showPageLoadingOverlay =>
+      !_showSplash &&
+      !_showBlockingError &&
+      (_showTransitionOverlay || _isRefreshing) &&
+      _hasLoadedOnce;
 
   Future<void> _onWebViewCreated(InAppWebViewController controller) async {
     _webViewController = controller;
     WebViewSessionBridge.attach(controller);
+    await _pullToRefreshController?.setBackgroundColor(Colors.white);
+    await _pullToRefreshController?.setColor(AppConfig.brandColor);
     await WebViewBridge.injectFlutterAppFlag(controller);
+    await WebViewBridge.injectFlutterAppStyles(controller);
     await WebViewBridge.registerHandlers(
       controller,
       onUserInteraction: _onUserInteraction,
@@ -327,11 +392,13 @@ class _WebViewScreenState extends State<WebViewScreen>
     setState(() {
       _hasLoadError = false;
       _errorMessage = null;
-      if (!_hasLoadedOnce) {
+      if (!_hasLoadedOnce && !_isRefreshing) {
         _showSplash = true;
+      } else if (_hasLoadedOnce && !_isRefreshing) {
+        _showTransitionOverlay = true;
       }
     });
-    _beginNavigation(indeterminate: !_hasLoadedOnce);
+    _beginNavigation(indeterminate: !_hasLoadedOnce && !_isRefreshing);
   }
 
   void _onLoadStop(InAppWebViewController controller, WebUri? url) {
@@ -340,6 +407,7 @@ class _WebViewScreenState extends State<WebViewScreen>
       return;
     }
     unawaited(_reinjectInteractionScript(controller));
+    _hidePageTransitionOverlay();
     _finishInitialLoad();
   }
 
@@ -371,7 +439,9 @@ class _WebViewScreenState extends State<WebViewScreen>
   }
 
   void _onPageCommitVisible(InAppWebViewController controller, WebUri? url) {
-    if (_hasLoadError || !_hasLoadedOnce) return;
+    if (_hasLoadError) return;
+    _hidePageTransitionOverlay();
+    if (!_hasLoadedOnce) return;
     _finishInitialLoad();
   }
 
@@ -414,6 +484,7 @@ class _WebViewScreenState extends State<WebViewScreen>
 
   Future<void> _handleBackNavigation() async {
     if (_webViewController != null && await _webViewController!.canGoBack()) {
+      _showPageTransitionOverlay();
       _beginNavigation(indeterminate: true);
       await _webViewController!.goBack();
       return;
@@ -487,6 +558,9 @@ class _WebViewScreenState extends State<WebViewScreen>
     allowsInlineMediaPlayback: true,
     useOnLoadResource: true,
     useShouldOverrideUrlLoading: true,
+    useHybridComposition: true,
+    underPageBackgroundColor: Colors.white,
+    transparentBackground: false,
   );
 
   @override
@@ -517,30 +591,7 @@ class _WebViewScreenState extends State<WebViewScreen>
           key: _scaffoldMessengerKey,
           child: Scaffold(
             backgroundColor: Colors.white,
-            body: SafeArea(
-              child: _buildBody(),
-            ),
-            appBar: AppBar(
-              backgroundColor: Colors.transparent,
-              elevation: 0,
-              scrolledUnderElevation: 0,
-              actions: [
-                PopupMenuButton<String>(
-                  icon: const Icon(Icons.more_vert, color: Colors.black54),
-                  onSelected: (value) {
-                    if (value == 'restore') {
-                      unawaited(_iapService.restorePurchases());
-                    }
-                  },
-                  itemBuilder: (context) => const [
-                    PopupMenuItem<String>(
-                      value: 'restore',
-                      child: Text('Restore Purchases'),
-                    ),
-                  ],
-                ),
-              ],
-            ),
+            body: _buildBody(),
           ),
         ),
       ),
@@ -548,29 +599,36 @@ class _WebViewScreenState extends State<WebViewScreen>
   }
 
   Widget _buildBody() {
+    final topInset = MediaQuery.paddingOf(context).top;
+
     return Stack(
       children: [
         Positioned.fill(
-          child: InAppWebView(
-            initialUrlRequest: URLRequest(url: WebUri(AppConfig.webUrl)),
-            initialSettings: _webViewSettings,
-            pullToRefreshController: _pullToRefreshController,
-            onWebViewCreated: _onWebViewCreated,
-            onLoadStart: _onLoadStart,
-            onLoadStop: _onLoadStop,
-            onProgressChanged: _onProgressChanged,
-            onUpdateVisitedHistory: _onUpdateVisitedHistory,
-            onPageCommitVisible: _onPageCommitVisible,
-            onReceivedError: _onReceivedError,
-            onReceivedHttpError: _onReceivedHttpError,
-            shouldOverrideUrlLoading: _shouldOverrideUrlLoading,
+          child: ColoredBox(
+            color: Colors.white,
+            child: InAppWebView(
+              initialUrlRequest: URLRequest(url: WebUri(AppConfig.webUrl)),
+              initialSettings: _webViewSettings,
+              initialUserScripts: WebViewBridge.initialUserScripts,
+              pullToRefreshController: _pullToRefreshController,
+              onWebViewCreated: _onWebViewCreated,
+              onLoadStart: _onLoadStart,
+              onLoadStop: _onLoadStop,
+              onProgressChanged: _onProgressChanged,
+              onUpdateVisitedHistory: _onUpdateVisitedHistory,
+              onPageCommitVisible: _onPageCommitVisible,
+              onReceivedError: _onReceivedError,
+              onReceivedHttpError: _onReceivedHttpError,
+              shouldOverrideUrlLoading: _shouldOverrideUrlLoading,
+            ),
           ),
         ),
         if (_showSplash && !_showBlockingError)
           Positioned.fill(
             child: AnimatedOpacity(
               opacity: _showSplash ? 1 : 0,
-              duration: const Duration(milliseconds: 250),
+              duration: const Duration(milliseconds: 400),
+              curve: Curves.easeOut,
               child: SplashOverlay(
                 progress: _loadProgress > 0 ? _loadProgress : null,
               ),
@@ -584,6 +642,7 @@ class _WebViewScreenState extends State<WebViewScreen>
             child: NavigationProgressBar(
               progress: _loadProgress,
               indeterminate: _navigationIndeterminate,
+              topInset: topInset,
             ),
           ),
         if (_showBlockingError)
@@ -603,16 +662,15 @@ class _WebViewScreenState extends State<WebViewScreen>
               onRetry: _retry,
             ),
           ),
+        if (_showPageLoadingOverlay)
+          Positioned.fill(
+            child: PageLoadingOverlay(
+              message: _isRefreshing ? 'Refreshing…' : 'Loading…',
+            ),
+          ),
         if (_iapService.purchasePending)
           Positioned.fill(
-            child: ColoredBox(
-              color: Colors.black.withValues(alpha: 0.25),
-              child: const Center(
-                child: CircularProgressIndicator(
-                  color: AppConfig.brandColor,
-                ),
-              ),
-            ),
+            child: IapOverlay(state: _iapService.uiState),
           ),
       ],
     );

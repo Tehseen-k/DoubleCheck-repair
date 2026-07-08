@@ -28,43 +28,57 @@ class ErrorStateView extends StatelessWidget {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(
-                  isOffline ? Icons.wifi_off_rounded : Icons.error_outline_rounded,
-                  size: 64,
-                  color: AppConfig.brandColor,
+                Container(
+                  width: 88,
+                  height: 88,
+                  decoration: BoxDecoration(
+                    color: AppConfig.brandColor.withValues(alpha: 0.1),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    isOffline
+                        ? Icons.wifi_off_rounded
+                        : Icons.cloud_off_rounded,
+                    size: 44,
+                    color: AppConfig.brandColor,
+                  ),
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: 28),
                 Text(
-                  isOffline ? 'No internet connection' : 'Unable to load page',
+                  isOffline ? 'You\'re offline' : 'Page couldn\'t load',
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                        fontWeight: FontWeight.w600,
+                        fontWeight: FontWeight.w700,
                       ),
                 ),
                 const SizedBox(height: 12),
                 Text(
                   message ??
                       (isOffline
-                          ? 'Check your connection and try again.'
-                          : 'Something went wrong while loading the page.'),
+                          ? 'Check your internet connection and try again.'
+                          : 'Something went wrong while loading. Pull down to refresh or tap Retry.'),
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                         color: Colors.grey.shade700,
+                        height: 1.45,
                       ),
                 ),
-                const SizedBox(height: 32),
+                const SizedBox(height: 36),
                 FilledButton.icon(
                   onPressed: onRetry,
                   style: FilledButton.styleFrom(
                     backgroundColor: AppConfig.brandColor,
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 24,
+                      horizontal: 28,
                       vertical: 14,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
                     ),
                   ),
                   icon: const Icon(Icons.refresh_rounded),
-                  label: const Text('Retry'),
+                  label: const Text('Try again'),
                 ),
               ],
             ),
