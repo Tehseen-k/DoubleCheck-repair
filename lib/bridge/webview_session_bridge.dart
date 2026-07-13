@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:doublecheck_repairs/config/app_config.dart';
+import 'package:doublecheck_repairs/services/app_session.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
@@ -26,6 +27,7 @@ abstract final class WebViewSessionBridge {
     await controller.evaluateJavascript(
       source: 'localStorage.setItem($key, $value);',
     );
+    AppSession.setBase44AccessToken(accessToken);
   }
 
   /// Injects session tokens and loads the dashboard URL via the WebView controller.
@@ -52,6 +54,8 @@ abstract final class WebViewSessionBridge {
           'localStorage.setItem($tokenKey, $value);',
     );
 
+    AppSession.setBase44AccessToken(accessToken);
+
     debugPrint('NAVIGATE TO: dashboard (${AppConfig.dashboardUrl})');
     await controller.loadUrl(
       urlRequest: URLRequest(url: WebUri(AppConfig.dashboardUrl)),
@@ -75,7 +79,34 @@ abstract final class WebViewSessionBridge {
     await navigateTo(AppConfig.dashboardUrl);
   }
 
+  static Future<String?> readAccessTokenFromStorage() async {
+    final controller = _controller;
+    if (controller == null) return null;
+
+    final key = jsonEncode(AppConfig.sessionStorageKey);
+    final result = await controller.evaluateJavascript(
+      source: 'localStorage.getItem($key);',
+    );
+
+    if (result == null) return null;
+
+    var token = result.toString().trim();
+    if (token.isEmpty || token == 'null') return null;
+
+    if (token.startsWith('"') && token.endsWith('"')) {
+      try {
+        final decoded = jsonDecode(token);
+        if (decoded is String) {
+          token = decoded;
+        }
+      } catch (_) {}
+    }
+
+    return token.isEmpty ? null : token;
+  }
+
   static Future<void> clearSession() async {
+    AppSession.clearBase44AccessToken();
     await _controller?.evaluateJavascript(source: 'localStorage.clear();');
   }
 }

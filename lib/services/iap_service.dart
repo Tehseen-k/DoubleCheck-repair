@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:doublecheck_repairs/bridge/webview_session_bridge.dart';
 import 'package:doublecheck_repairs/config/app_config.dart';
+import 'package:doublecheck_repairs/services/app_session.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:in_app_purchase/in_app_purchase.dart';
@@ -273,10 +274,28 @@ class IapService extends ChangeNotifier {
 
   Future<bool> verifyAndActivate(PurchaseDetails purchase) async {
     try {
+      final authToken = await AppSession.resolveBase44AccessToken();
+      if (authToken == null || authToken.isEmpty) {
+        debugPrint(
+          'IAP: WARNING - no Base44 auth token found, verifyPurchase '
+          'will fail',
+        );
+        _showSnackbar('Please sign in again before purchasing', isError: true);
+        return false;
+      }
+
+      final authPreview = authToken.length > 20
+          ? authToken.substring(0, 20)
+          : authToken;
+      debugPrint('IAP: sending verifyPurchase with auth token: $authPreview');
+
       final response = await http
           .post(
             Uri.parse(AppConfig.verifyPurchaseUrl),
-            headers: const {'Content-Type': 'application/json'},
+            headers: {
+              'Authorization': 'Bearer $authToken',
+              'Content-Type': 'application/json',
+            },
             body: jsonEncode({
               'platform': 'android',
               'productId': purchase.productID,
